@@ -33,12 +33,4 @@ jobs:
               if: success()
               run: echo "Sync completed successfully"
 
-            - name: Check for Failure
-              if: failure()
-              run: |
-                  echo "[Error] Sync failed. This might be due to:"
-                  echo "1. Changes in the upstream workflow file"
-                  echo "2. Merge conflicts that need manual resolution"
-                  echo "3. Network issues"
-                  echo "Please check the logs and consider manual sync if needed."
-                  exit 1
+
