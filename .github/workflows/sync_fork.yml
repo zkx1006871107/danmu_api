@@ -1,7 +1,13 @@
 name: Fork Sync
 
+# 必须同时给 workflows:write：
+# 上游新增的 .github/workflows/pr_agent.yml 属于 workflow 文件，
+# 只有 contents:write 的 GITHUB_TOKEN push 含 workflow 变更会被
+# "refusing to allow a GitHub App to create or update workflow" 拒绝，
+# aormsby 动作就以 exit 1 失败。
 permissions:
   contents: write
+  workflows: write
 
 on:
   schedule:
