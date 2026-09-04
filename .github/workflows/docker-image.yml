@@ -7,16 +7,18 @@ on:
   pull_request:
     branches:
       - main
-    if: github.repository == 'huangxd-/danmu_api'
 
 jobs:
   build:
+    # 只在上游仓库跑：fork 上没有 DOCKER_USERNAME/DOCKER_PASSWORD，
+    # 否则每次推 sync_fork.yml 都会以 "Username and password required" 失败。
+    if: github.repository == 'huangxd-/danmu_api'
     runs-on: ubuntu-latest
 
     steps:
       # 检出代码
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       # 从 danmu_api/configs/globals.js 中读取版本号
       - name: Read version from globals.js
