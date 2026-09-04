@@ -1,13 +1,11 @@
 name: Fork Sync
 
-# 必须同时给 workflows:write：
-# 上游新增的 .github/workflows/pr_agent.yml 属于 workflow 文件，
-# 只有 contents:write 的 GITHUB_TOKEN push 含 workflow 变更会被
-# "refusing to allow a GitHub App to create or update workflow" 拒绝，
-# aormsby 动作就以 exit 1 失败。
+# 注意：GITHUB_TOKEN 默认无权 push .github/workflows/ 下的文件，
+# 且 permissions 里根本没有 'workflows' 这个 key（加了反而报 Invalid workflow file）。
+# 上游这次新增了 .github/workflows/pr_agent.yml，所以必须用带 workflow 权限的 PAT。
+# 步骤：先按正文建 SYNC_PAT，再跑这个文件。
 permissions:
   contents: write
-  workflows: write
 
 on:
   schedule:
@@ -24,13 +22,15 @@ jobs:
       - name: Checkout target repo (full history, required for merge)
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # 关键：必须用 PAT，不能用 GITHUB_TOKEN，否则 push 到 pr_agent.yml 时被平台拒绝
+          token: ${{ secrets.SYNC_PAT }}
           fetch-depth: 0
 
       - name: Sync Upstream
         uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.3
         with:
-          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
+          # 关键：同样用 PAT，action 内部的 git push 才会带 workflow 权限
+          target_repo_token: ${{ secrets.SYNC_PAT }}
           upstream_sync_repo: huangxd-/danmu_api
           upstream_sync_branch: main
           target_sync_branch: main
