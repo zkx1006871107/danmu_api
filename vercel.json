@@ -25,6 +25,7 @@
     }
   ],
   "env": {
-    "SOURCE_ORDER": "douban,360,renren,hanjutv,dandan,bahamut"
+    "SOURCE_ORDER": "douban,360,renren,hanjutv,dandan,bahamut",
+    "RATE_LIMIT_MAX_REQUESTS": "0"
   }
 }
