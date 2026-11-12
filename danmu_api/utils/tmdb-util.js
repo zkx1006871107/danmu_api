@@ -2,6 +2,7 @@ import { globals } from '../configs/globals.js';
 import { log } from './log-util.js'
 import { httpGet } from "./http-util.js";
 import { isNonChinese } from "./zh-util.js";
+import { normalizeTitleForMatch } from "./common-util.js";
 import { searchBangumiData } from './bangumi-data-util.js';
 
 // ---------------------
@@ -118,37 +119,40 @@ async function getTmdbAlternativeTitles(mediaType, tmdbId, options = {}) {
   return await tmdbApiGet(url, options);
 }
 
-// 从别名中提取中文别名相关函数
-function extractChineseTitleFromAlternatives(altData, mediaType, queryTitle = "") {
-  // 兼容不同 mediaType 的层级结构
-  const titles = altData?.data?.results || altData?.data?.titles || [];
+// 兼容不同 mediaType 的别名层级结构（电影为 titles，剧集为 results）
+const getAlternativeEntries = altData => altData?.data?.results || altData?.data?.titles || [];
+
+// 别名条目的显示文本（alt 接口统一为 title，兼容 name）
+const getAlternativeText = entry => entry.title || entry.name || "";
+
+// 从别名池中按地区优先级提取中文标题（CN > TW > HK > SG > 任意中文）
+function pickChineseTitleFromAlternatives(altData) {
+  const titles = getAlternativeEntries(altData);
+  if (!titles.length) return null;
+
+  // 地区优先级：按 CN > TW > HK > SG 依次查找中文别名
+  for (const region of ['CN', 'TW', 'HK', 'SG']) {
+    const match = titles.find(t => (t.iso_3166_1 || t.iso_639_1) === region && !isNonChinese(getAlternativeText(t)));
+    if (match) return getAlternativeText(match);
+  }
+
+  // 兜底：任意包含中文的别名
+  const anyChinese = titles.find(t => !isNonChinese(getAlternativeText(t)));
+  return anyChinese ? getAlternativeText(anyChinese) : null;
+}
+
+// 从别名中提取中文别名：精确命中检索词优先，其次按地区优先级
+function extractChineseTitleFromAlternatives(altData, queryTitle = "") {
+  const titles = getAlternativeEntries(altData);
   if (!titles.length) return null;
 
   const cleanQuery = (queryTitle || "").toLowerCase().trim();
-  const getStr = t => t.title || t.name || "";
-
-  // 定义优先级判定规则数组，按先后顺序依次验证
-  const priorityRules = [
-    // 1. 最高优先级：精确命中用户搜索词
-    t => cleanQuery && getStr(t).toLowerCase().trim() === cleanQuery,
-    // 2. 地区优先级：按 CN > TW > HK > SG 顺序映射出 4 个规则函数
-    ...['CN', 'TW', 'HK', 'SG'].map(region => 
-      t => (t.iso_3166_1 || t.iso_639_1) === region && !isNonChinese(getStr(t))
-    ),
-    // 3. 兜底优先级：任何包含中文的别名
-    t => !isNonChinese(getStr(t))
-  ];
-
-  // 遍历策略链，一旦有规则命中 (find 返回了对象)，立即提取并结束
-  for (const rule of priorityRules) {
-    const match = titles.find(rule);
-    if (match) {
-      const bestMatchTitle = getStr(match);
-      log("info", `[system] [tmdb] 按优先级策略成功提取最佳中文别名: ${bestMatchTitle}`);
-      return bestMatchTitle;
-    }
+  const exactMatch = cleanQuery && titles.find(t => getAlternativeText(t).toLowerCase().trim() === cleanQuery);
+  const chineseTitle = exactMatch ? getAlternativeText(exactMatch) : pickChineseTitleFromAlternatives(altData);
+  if (chineseTitle) {
+    log("info", `[system] [tmdb] 按优先级策略成功提取最佳别名: ${chineseTitle}`);
+    return chineseTitle;
   }
-
   return null;
 }
 
@@ -185,10 +189,10 @@ async function getChineseTitleForResult(result, signal, queryTitle = "") {
       throw new DOMException('Aborted', 'AbortError');
     }
 
-    const chineseTitle = extractChineseTitleFromAlternatives(altResp, mediaType, queryTitle);
+    const chineseTitle = extractChineseTitleFromAlternatives(altResp, queryTitle);
 
     if (chineseTitle) {
-      log("info", `[system] [tmdb] 将使用中文别名进行相似匹配: ${chineseTitle}`);
+      log("info", `[system] [tmdb] 将使用别名进行相似匹配: ${chineseTitle}`);
       return chineseTitle;
     } else {
       log("info", `[system] [tmdb] 未找到中文别名，使用原标题: ${resultTitle}`);
@@ -216,7 +220,7 @@ export async function getTmdbJaOriginalTitle(title, signal = null, sourceLabel =
   if (globals.useBangumiData) {
     const localMatches = await searchBangumiData(cleanTitle, ['tmdb', 'bangumi', 'anidb']);
     if (localMatches && localMatches.length > 0) {
-      // 按精确度排序：将正好匹配检索词的条目排在前面，避免子串混淆（如 "机动战士高达00" 匹配到 "机动战士高达0079"）
+      // searchBangumiData 已按归一化标题排序；此处再按字面相等优先，把与检索词完全一致的条目前置，避免子串混淆（如 "机动战士高达00" 匹配到 "机动战士高达0079"）
       if (localMatches.length > 1) {
         localMatches.sort((a, b) => {
           const aExact = a.titles.some(t => t === cleanTitle);
@@ -231,7 +235,7 @@ export async function getTmdbJaOriginalTitle(title, signal = null, sourceLabel =
       const jaOriginalTitle = m.title; // Bangumi Data 的主标题就是原名
 
       log("info", `[system] [tmdb] Bangumi-Data 本地命中，提取原名成功: 原名=${jaOriginalTitle}, 别名=${displayTitle}（检索词：${cleanTitle}）`);
-      return { title: jaOriginalTitle, cnAlias: displayTitle };
+      return { title: stripSeasonMarker(jaOriginalTitle), cnAlias: displayTitle };
     }
   }
 
@@ -487,7 +491,7 @@ export async function getTmdbJaOriginalTitle(title, signal = null, sourceLabel =
         }
 
         // 返回对象，包含原名和别名
-        return { title: jaOriginalTitle, cnAlias: bestMatchChineseTitle };
+        return { title: stripSeasonMarker(jaOriginalTitle), cnAlias: bestMatchChineseTitle };
 
       } catch (error) {
          if (error.name === 'AbortError') {
@@ -619,29 +623,41 @@ export async function getTMDBChineseTitle(title, season = null, episode = null) 
       return title;
     }
 
-    // 获取第一个匹配结果的 ID
-    // 查找第一个 name/title 包含中文的结果
-    const firstResult = searchResponse.data.results.find(result => {
-      const resultName = isTV ? result.name : result.title;
-      return resultName && !isNonChinese(resultName);
-    });
+    const results = searchResponse.data.results;
+    const getLocalized = result => isTV ? result.name : result.title;
+    const getOriginal = result => isTV ? result.original_name : result.original_title;
+    const titleKey = value => normalizeTitleForMatch(value).toLowerCase();
+    const queryKey = titleKey(title);
 
-    // 如果没有找到包含中文的结果，使用第一个结果
-    const selectedResult = firstResult || searchResponse.data.results[0];
+    // 原标题或本地化标题与查询词一致的作品才是同一部，避免同名无关条目抢先命中
+    const exactMatches = results.filter(result =>
+      titleKey(getOriginal(result)) === queryKey || titleKey(getLocalized(result)) === queryKey
+    );
 
-    // 电视剧使用 name 字段，电影使用 title 字段
-    const chineseTitle = isTV ? selectedResult.name : selectedResult.title;
+    // 精确命中时从命中池选择，否则沿用首个含中文名的结果、再回退首个结果
+    const candidatePool = exactMatches.length > 0 ? exactMatches : results;
+    const selectedResult = candidatePool.find(result => {
+      const localized = getLocalized(result);
+      return localized && !isNonChinese(localized);
+    }) || candidatePool[0];
+
+    // 本地化标题为中文时直接使用，否则从别名中提取中文名
+    let chineseTitle = getLocalized(selectedResult);
+    if (exactMatches.length > 0 && (!chineseTitle || isNonChinese(chineseTitle))) {
+      const alternatives = await getTmdbAlternativeTitles(mediaType, selectedResult.id);
+      chineseTitle = pickChineseTitleFromAlternatives(alternatives) || chineseTitle;
+    }
 
     // 如果有中文标题则返回，否则返回原标题
     if (chineseTitle) {
-      log("info", `原标题: ${title} -> 中文标题: ${chineseTitle}`);
+      log("info", `[system] [tmdb] 原标题: ${title} -> 中文标题: ${chineseTitle}`);
       return chineseTitle;
     } else {
       return title;
     }
 
   } catch (error) {
-    log("error", '查询 TMDB 时出错:', error);
+    log("error", '[system] [tmdb] 查询 TMDB 时出错:', error);
     return title;
   }
 }
@@ -650,10 +666,22 @@ export async function getTMDBChineseTitle(title, season = null, episode = null) 
 // 智能标题替换相关函数
 // =====================
 
-// 识别季度、剧场版、外传、副标题等后缀信息的正则白名单
-const SUFFIX_PATTERN = /(?:\s+|^)(?:第?\s*(?:\d+|[一二三四五六七八九十]+)\s*[季期部]|season\s*\d+|s\d+|part\s*\d+|act\s*\d+|phase\s*\d+|the\s+final\s+season|(?:movie|film|ova|oad|sp|剧场版|劇場版|续[篇集]|外传)(?![a-z]))|[:：~～]|\s+.*?篇|(?<=\s|^)\d+$/i
+// 季与分部标记：第X季/期/部、第X赛段、2nd Season、1st STAGE、season N、sN、part/act/phase N、the final season
+const SEASON_MARKER_SOURCE = '第?\\s*(?:\\d+|[一二三四五六七八九十]+)\\s*(?:[季期部]|赛段)|\\d+(?:st|nd|rd|th)\\s+(?:season|stage)|season\\s*\\d+|s\\d+|part\\s*\\d+|act\\s*\\d+|phase\\s*\\d+|the\\s+final\\s+season';
 
-const SEPARATOR_REGEX = /[ :：~～]/;
+// 假名范围：波浪号两侧同为假名时属词内长音符（如「も～っと」「地獄先生ぬ～べ～」），不构成副标题分隔
+const KANA_SOURCE = '\\u3041-\\u3096\\u30A1-\\u30FA\\u30FC';
+
+// 副标题分隔：冒号后须有空白；波浪号至少一侧非假名；半角、全角与 U+301C 波浪号一并识别
+const SUBTITLE_SEPARATOR_SOURCE = `[:：]\\s|[~～\\u301C](?![${KANA_SOURCE}]|$)|(?<![${KANA_SOURCE}])[~～\\u301C]`;
+
+// 识别季度、赛段、剧场版、外传、副标题等后缀信息的正则白名单
+const SUFFIX_PATTERN = new RegExp(`(?:\\s+|^)(?:${SEASON_MARKER_SOURCE}|(?:movie|film|ova|oad|sp|剧场版|劇場版|续[篇集]|外传)(?![a-z]))|${SUBTITLE_SEPARATOR_SOURCE}|\\s+.*?篇|(?<=\\s|^)\\d+$`, 'i');
+
+// 出站检索词只剥离季与分部标记，分隔符与影片类型词属于标题本身
+const SEASON_MARKER_PATTERN = new RegExp(`(?:\\s+|^)(?:${SEASON_MARKER_SOURCE})`, 'i');
+
+const SEPARATOR_REGEX = new RegExp(` |${SUBTITLE_SEPARATOR_SOURCE}`);
 
 /**
  * 寻找标题中属于后缀或季度信息的起始位置
@@ -676,6 +704,17 @@ export function cleanSearchQuery(title) {
     return title.substring(0, limit).trim();
   }
   return title;
+}
+
+/**
+ * 剥离标题中的季与分部标记，得到适合作为检索关键词的标题主体
+ * 标记出现在标题开头或剥离后为空时保留原标题，避免检索关键词被清空
+ * @param {string} title 原始标题
+ * @returns {string} 去除季与分部标记的标题
+ */
+export function stripSeasonMarker(title) {
+  const match = title.match(SEASON_MARKER_PATTERN);
+  return match ? title.substring(0, match.index).trim() || title : title;
 }
 
 /**
