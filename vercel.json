@@ -23,5 +23,8 @@
       "src": "/(.*)",
       "dest": "/danmu_api/worker.js"
     }
-  ]
+  ],
+  "env": {
+    "SOURCE_ORDER": "douban,360,renren,hanjutv,dandan,bahamut"
+  }
 }
