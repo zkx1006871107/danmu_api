@@ -1,16 +1,18 @@
 name: Fork Sync
 
-# 注意：GITHUB_TOKEN 默认无权 push .github/workflows/ 下的文件，
-# 且 permissions 里根本没有 'workflows' 这个 key（加了反而报 Invalid workflow file）。
-# 上游这次新增了 .github/workflows/pr_agent.yml，所以必须用带 workflow 权限的 PAT。
-# 步骤：先按正文建 SYNC_PAT，再跑这个文件。
+# SYNC_PAT must permit repository writes, including workflow file updates.
+# Keep this fork-specific workflow when merging upstream changes.
 permissions:
   contents: write
 
 on:
   schedule:
-    - cron: "0 0 * * *"  # 每天午夜执行
+    - cron: "0 0 * * *"  # 每天 UTC 00:00（北京时间 08:00）
   workflow_dispatch:  # 允许手动触发
+
+concurrency:
+  group: fork-sync-main
+  cancel-in-progress: false
 
 jobs:
   sync_with_upstream:
@@ -19,22 +21,60 @@ jobs:
     if: ${{ github.event.repository.fork }}
 
     steps:
+      - name: Check sync credential availability
+        shell: bash
+        env:
+          SYNC_PAT: ${{ secrets.SYNC_PAT }}
+        run: |
+          if [[ -z "$SYNC_PAT" ]]; then
+            echo "::error::Repository secret SYNC_PAT is required for syncing workflow updates."
+            exit 1
+          fi
+
       - name: Checkout target repo (full history, required for merge)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
-          # 关键：必须用 PAT，不能用 GITHUB_TOKEN，否则 push 到 pr_agent.yml 时被平台拒绝
           token: ${{ secrets.SYNC_PAT }}
+          ref: main
           fetch-depth: 0
 
       - name: Sync Upstream
-        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.3
-        with:
-          # 关键：同样用 PAT，action 内部的 git push 才会带 workflow 权限
-          target_repo_token: ${{ secrets.SYNC_PAT }}
-          upstream_sync_repo: huangxd-/danmu_api
-          upstream_sync_branch: main
-          target_sync_branch: main
-          test_mode: false
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream https://github.com/huangxd-/danmu_api.git
+          # Do not use --depth or --shallow-since: merging needs complete history.
+          git fetch --no-tags upstream refs/heads/main:refs/remotes/upstream/main
+
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "No new upstream commits to sync."
+            exit 0
+          fi
+
+          sync_workflow='.github/workflows/sync_fork.yml'
+          merge_status=0
+          git merge --no-ff --no-commit upstream/main || merge_status=$?
+          if [[ "$merge_status" -ne 0 ]]; then
+            conflicts=$(git diff --name-only --diff-filter=U)
+            if [[ "$conflicts" != "$sync_workflow" ]]; then
+              echo "::error::Upstream merge failed or conflicts need manual resolution:"
+              printf '%s\n' "$conflicts"
+              if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+                git merge --abort
+              fi
+              exit "$merge_status"
+            fi
+            echo "Resolving the sync workflow conflict using the fork's version."
+          fi
+
+          # Only this workflow is fork-owned; all other conflicts must be reviewed.
+          git restore --source=HEAD --staged --worktree -- "$sync_workflow"
+          git commit -m "Merge upstream/main; preserve fork sync workflow"
+          # A normal push rejects concurrent remote changes instead of overwriting them.
+          git push origin HEAD:refs/heads/main
 
       - name: Check for new commits
         if: success()
